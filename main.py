@@ -156,8 +156,6 @@ def chunk_text(text, chunk_size=300, chunk_overlap=50):
 # --- Custom Audio Recorder Component (Input) ---
 # This JavaScript captures audio and sends it back to Streamlit via a message
 def st_audiorecorder_v2(key=None):
-    # The 'key' argument passed to st_audiorecorder_v2 is used here for the JS
-    # postMessage communication, not for the st.components.v1.html call itself.
     if key is None:
         key = "default_audiorecorder_key"
 
@@ -232,11 +230,10 @@ def st_audiorecorder_v2(key=None):
     </script>
     """
     # Use st.components.v1.html to embed the component.
-    # The 'key' argument should NOT be passed here.
-    # The value received from JS via postMessage (which uses the 'key')
-    # is associated with the component's state automatically.
-    returned_base64_audio = st.components.v1.html(component_html, height=150, scrolling=False)
-    return returned_base64_audio
+    # We don't assign the return value directly here because we'll
+    # access it via st.session_state[key]
+    st.components.v1.html(component_html, height=150, scrolling=False)
+    # The actual value will be in st.session_state[key] once it's sent from JS
 
 
 # --- Text-to-Speech Function (Output) ---
@@ -256,17 +253,19 @@ def text_to_audio(text_input):
 # Use columns for a cleaner layout of the two main features
 col1, col2 = st.columns(2)
 
+# Define the key for the audio recorder
+AUDIO_RECORDER_KEY = "voice_query_recorder_component"
+
 with col1:
     st.subheader("🎤 Voice Query Analysis")
-    # Custom microphone input widget
-    # Pass a specific key to st_audiorecorder_v2 to ensure state separation
-    recorded_audio_base64 = st_audiorecorder_v2(key="voice_query_recorder_component")
+    # Call the custom microphone input widget. It will put its value into st.session_state.
+    st_audiorecorder_v2(key=AUDIO_RECORDER_KEY)
+
+    # Check st.session_state for the recorded audio data
+    recorded_audio_base64 = st.session_state.get(AUDIO_RECORDER_KEY, None)
 
     # Only proceed if audio data has been recorded AND the transcribe button is pressed
-    # The 'key' argument here for the component instance in Streamlit itself is handled
-    # by Streamlit's internal state management.
-    # The issue was passing 'key' into the html() function.
-    if recorded_audio_base64 and "data:audio/webm;base64," in recorded_audio_base64:
+    if recorded_audio_base64 and isinstance(recorded_audio_base64, str) and "data:audio/webm;base64," in recorded_audio_base64:
         st.success("Audio recorded! Click 'Transcribe & Fetch Stock' to process.")
 
         # Decode the Base64 audio data when the button is pressed
@@ -275,13 +274,11 @@ with col1:
             try:
                 audio_data_bytes = base64.b64decode(base64_data_only)
                 with st.spinner("Uploading audio to AssemblyAI..."):
-                    # AssemblyAI's upload endpoint can take raw bytes
-                    # We need to provide a filename and content type
-                    files = {"file": ("audio.webm", audio_data_bytes, "audio/webm")} # Use webm as type
+                    files = {"file": ("audio.webm", audio_data_bytes, "audio/webm")}
                     upload_res = requests.post(
                         "https://api.assemblyai.com/v2/upload",
                         headers=headers,
-                        files=files # Use the files dictionary with bytes
+                        files=files
                     )
                     if upload_res.status_code != 200:
                         st.error("❌ Audio upload failed to AssemblyAI.")
@@ -321,15 +318,13 @@ with col1:
                                         keywords = extract_possible_company_names(transcribed_text)
                                         st.write("🔍 Extracted keywords from voice:", keywords)
 
-                                        found_symbols = set() # Use a set to avoid duplicate symbols
+                                        found_symbols = set()
 
-                                        # Try to find symbols using FMP (prioritized for broader search)
                                         for keyword in keywords:
                                             symbol = search_stock_symbol_fmp(keyword)
                                             if symbol:
                                                 found_symbols.add(symbol)
 
-                                        # Also, try to directly validate keywords as YFinance tickers
                                         for word in keywords:
                                             cleaned_word = word.upper()
                                             if cleaned_word not in found_symbols and (len(cleaned_word) <= 5 and cleaned_word.isalpha() or '.' in cleaned_word):
@@ -343,8 +338,8 @@ with col1:
                                         if found_symbols:
                                             st.info(f"🔎 Found potential stock symbols: {', '.join(list(found_symbols))}")
 
-                                            all_stock_summaries = [] # To store summaries of all found stocks
-                                            for symbol in list(found_symbols): # Convert set to list to iterate
+                                            all_stock_summaries = []
+                                            for symbol in list(found_symbols):
                                                 data = get_stock_summary(symbol)
                                                 if "error" not in data:
                                                     all_stock_summaries.append(data)
@@ -353,13 +348,12 @@ with col1:
 
                                             if all_stock_summaries:
                                                 st.subheader("📊 Stock Information from Voice Query:")
-                                                # Prepare text for TTS output
                                                 output_speech_text = "Here's a brief overview of the stocks you asked about: "
                                                 for data in all_stock_summaries:
-                                                    st.markdown("---") # Separator for each stock
+                                                    st.markdown("---")
                                                     st.write(f"**{data['name']} ({data['symbol']})**")
                                                     st.write(f"💰 Current Price: ${data['price']:.2f}")
-                                                    if data['open'] != 'N/A': # Check if data is available
+                                                    if data['open'] != 'N/A':
                                                         st.write(f"📈 Open: ${data['open']:.2f}, High: ${data['high']:.2f}, Low: ${data['low']:.2f}")
                                                     if data['marketCap'] != 'N/A':
                                                         st.write(f"🏢 Market Cap: {data['marketCap']}")
@@ -367,23 +361,20 @@ with col1:
                                                     st.write(f"📅 Weekly Change: **{data['weekly_change_pct']:.2f}%**")
                                                     st.write(f"📈 Weekly Trend: {data['trend']}")
 
-                                                    # Insight sentence for weekly change
                                                     if data['weekly_change_pct'] > 0:
                                                         insight_sentence = f"{data['name']} stocks are up by {data['weekly_change_pct']:.2f}% this week."
                                                     elif data['weekly_change_pct'] < 0:
                                                         insight_sentence = f"{data['name']} stocks are down by {abs(data['weekly_change_pct']):.2f}% this week."
                                                     else:
                                                         insight_sentence = f"{data['name']} stocks are unchanged this week."
-                                                    st.info(f"💡 Insight: {insight_sentence}") # Display the insight sentence
+                                                    st.info(f"💡 Insight: {insight_sentence}")
 
                                                     if data['summary'] and data['summary'] != 'No business summary available.':
-                                                        st.markdown(f"📝 **Business Summary:** {data['summary'][:300]}...") # Show a snippet of summary
+                                                        st.markdown(f"📝 **Business Summary:** {data['summary'][:300]}...")
 
-                                                    # Add to speech text
                                                     output_speech_text += f"{data['name']} is at ${data['price']:.2f}. Daily change {data['daily_change_pct']:.2f} percent. Weekly change {data['weekly_change_pct']:.2f} percent. "
                                                     output_speech_text += f"Insight: {insight_sentence}. "
 
-                                                # --- Text-to-Speech Output ---
                                                 st.subheader("🔊 Audio Response")
                                                 audio_output_bytes_io = text_to_audio(output_speech_text)
                                                 if audio_output_bytes_io:
@@ -414,10 +405,12 @@ with col1:
                 st.error(f"❌ Error decoding Base64 audio data: {e}")
                 st.warning("Please ensure audio is recorded before clicking 'Transcribe & Fetch Stock'.")
 
-    elif recorded_audio_base64: # If component returns a non-empty string, but not yet the data:audio/webm prefix
+    # This condition is for when the component has initialized but no audio has been recorded yet.
+    # `recorded_audio_base64` will be `None` initially, or an empty string from JS if no recording happened.
+    elif recorded_audio_base64 is None or (isinstance(recorded_audio_base64, str) and not recorded_audio_base64.strip()):
+        st.info("Ready to record your voice query. Click 'Start Recording' and then 'Stop Recording'.")
+    else: # This handles the state where some data might be present but not the full base64 audio (e.g., initial click)
         st.info("Recording initiated. Please click 'Stop Recording' then 'Transcribe & Fetch Stock'.")
-    else: # Initial state, or after page refresh, when no audio has been recorded yet.
-        st.info("Ready to record your voice query.")
 
 
 with col2:
