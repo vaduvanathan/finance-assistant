@@ -156,6 +156,8 @@ def chunk_text(text, chunk_size=300, chunk_overlap=50):
 # --- Custom Audio Recorder Component (Input) ---
 # This JavaScript captures audio and sends it back to Streamlit via a message
 def st_audiorecorder_v2(key=None):
+    # The 'key' argument passed to st_audiorecorder_v2 is used here for the JS
+    # postMessage communication, not for the st.components.v1.html call itself.
     if key is None:
         key = "default_audiorecorder_key"
 
@@ -202,7 +204,7 @@ def st_audiorecorder_v2(key=None):
                         // Send Base64 data back to Streamlit
                         window.parent.postMessage({{
                             type: 'streamlit:setComponentValue',
-                            key: '{key}',
+                            key: '{key}', // This 'key' is for the JS communication
                             value: base64data
                         }}, '*');
                         statusDiv.textContent = 'Audio recorded and sent.';
@@ -229,9 +231,13 @@ def st_audiorecorder_v2(key=None):
         }};
     </script>
     """
-    # Use st.components.v1.html to embed the component
-    returned_base64_audio = st.components.v1.html(component_html, height=150, scrolling=False, key=key)
+    # Use st.components.v1.html to embed the component.
+    # The 'key' argument should NOT be passed here.
+    # The value received from JS via postMessage (which uses the 'key')
+    # is associated with the component's state automatically.
+    returned_base64_audio = st.components.v1.html(component_html, height=150, scrolling=False)
     return returned_base64_audio
+
 
 # --- Text-to-Speech Function (Output) ---
 def text_to_audio(text_input):
@@ -253,9 +259,13 @@ col1, col2 = st.columns(2)
 with col1:
     st.subheader("🎤 Voice Query Analysis")
     # Custom microphone input widget
-    recorded_audio_base64 = st_audiorecorder_v2(key="voice_query_recorder")
+    # Pass a specific key to st_audiorecorder_v2 to ensure state separation
+    recorded_audio_base64 = st_audiorecorder_v2(key="voice_query_recorder_component")
 
     # Only proceed if audio data has been recorded AND the transcribe button is pressed
+    # The 'key' argument here for the component instance in Streamlit itself is handled
+    # by Streamlit's internal state management.
+    # The issue was passing 'key' into the html() function.
     if recorded_audio_base64 and "data:audio/webm;base64," in recorded_audio_base64:
         st.success("Audio recorded! Click 'Transcribe & Fetch Stock' to process.")
 
@@ -312,13 +322,13 @@ with col1:
                                         st.write("🔍 Extracted keywords from voice:", keywords)
 
                                         found_symbols = set() # Use a set to avoid duplicate symbols
-                                        
+
                                         # Try to find symbols using FMP (prioritized for broader search)
                                         for keyword in keywords:
                                             symbol = search_stock_symbol_fmp(keyword)
                                             if symbol:
                                                 found_symbols.add(symbol)
-                                                
+
                                         # Also, try to directly validate keywords as YFinance tickers
                                         for word in keywords:
                                             cleaned_word = word.upper()
@@ -328,7 +338,7 @@ with col1:
                                                     if ticker_info and ticker_info.get("symbol") == cleaned_word and ticker_info.get("regularMarketPrice"):
                                                         found_symbols.add(cleaned_word)
                                                 except:
-                                                    pass 
+                                                    pass
 
                                         if found_symbols:
                                             st.info(f"🔎 Found potential stock symbols: {', '.join(list(found_symbols))}")
@@ -368,7 +378,7 @@ with col1:
 
                                                     if data['summary'] and data['summary'] != 'No business summary available.':
                                                         st.markdown(f"📝 **Business Summary:** {data['summary'][:300]}...") # Show a snippet of summary
-                                                    
+
                                                     # Add to speech text
                                                     output_speech_text += f"{data['name']} is at ${data['price']:.2f}. Daily change {data['daily_change_pct']:.2f} percent. Weekly change {data['weekly_change_pct']:.2f} percent. "
                                                     output_speech_text += f"Insight: {insight_sentence}. "
@@ -402,10 +412,11 @@ with col1:
                                             st.audio(audio_output_bytes_io.read(), format='audio/mp3')
             except base64.binascii.Error as e:
                 st.error(f"❌ Error decoding Base64 audio data: {e}")
-                st.warning("Please record audio before clicking 'Transcribe & Fetch Stock'.")
-    elif recorded_audio_base64: # This condition catches if recorded_audio_base64 is a non-empty string but NOT valid audio data
-        st.info("Please record audio before clicking 'Transcribe & Fetch Stock'.")
-    else: # This condition is for the initial state before any interaction
+                st.warning("Please ensure audio is recorded before clicking 'Transcribe & Fetch Stock'.")
+
+    elif recorded_audio_base64: # If component returns a non-empty string, but not yet the data:audio/webm prefix
+        st.info("Recording initiated. Please click 'Stop Recording' then 'Transcribe & Fetch Stock'.")
+    else: # Initial state, or after page refresh, when no audio has been recorded yet.
         st.info("Ready to record your voice query.")
 
 
@@ -440,7 +451,7 @@ with col2:
             st.markdown("- **Identify key entities (companies, dates, financial figures)**")
             st.markdown("- **Summarize sections**")
             st.markdown("- **Answer questions based on PDF content (RAG)**")
-            
+
             # Example: Simple keyword search in PDF
             st.markdown("**Simple Keyword Search:**")
             pdf_keywords_to_find = ["earnings", "revenue", "profit", "loss", "outlook", "guidance", "dividend", "acquisition", "merger"]
@@ -454,16 +465,16 @@ with col2:
             # Example: Try to find stock symbols in the PDF content itself
             st.markdown("**Attempting to find stock symbols in PDF:**")
             pdf_found_symbols = set()
-            
+
             # Extract possible company names from the PDF text using the same logic
             pdf_possible_names = extract_possible_company_names(extracted_text)
-            
+
             # Try to find symbols using FMP for keywords from PDF
             for keyword in pdf_possible_names:
                 symbol = search_stock_symbol_fmp(keyword)
                 if symbol:
                     pdf_found_symbols.add(symbol)
-            
+
             # Also, try to directly validate keywords from PDF as YFinance tickers
             for word in pdf_possible_names: # Re-use cleaned words
                 cleaned_word = word.upper()
@@ -485,7 +496,7 @@ with col2:
                         pdf_stock_data_results[symbol] = data
                     else:
                         st.warning(f"⚠️ {data['error']} for symbol from PDF: {symbol}")
-                
+
                 if pdf_stock_data_results:
                     for symbol, data in pdf_stock_data_results.items():
                         st.markdown("---") # Separator for each stock
