@@ -2,3 +2,4 @@ streamlit
 requests
 yfinance
 PyMuPDF
+streamlit_audiorecorder
