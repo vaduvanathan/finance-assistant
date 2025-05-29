@@ -3,17 +3,19 @@ import requests
 import time
 import yfinance as yf
 import string
-import fitz
-import io # Required for handling audio bytes in memory
-import base64 # Required by streamlit_audiorecorder
-from streamlit_audiorecorder import st_audiorecorder # Import the audio recorder
+import fitz  # PyMuPDF for PDF processing
+import io  # Required for handling audio bytes in memory
+import base64  # Required by custom audio recorder
+from gtts import gTTS  # Google Text-to-Speech
 
 st.set_page_config(page_title="Finance Voice & Document Assistant", layout="wide")
 st.title("🎙️ Multi-Source Finance Assistant")
 
-# API keys
+# --- Configuration ---
+# API keys are included directly in the code as requested.
+# WARNING: For production apps, it's highly recommended to use Streamlit Secrets
+# or environment variables for security instead of hardcoding API keys.
 ASSEMBLYAI_API_KEY = "a5c865ecb6cd4152ad9c91564a753cd2"
-# Note: FMP free tier is very limited. You might hit limits quickly.
 FMP_API_KEY = "vLJtmE98fFBnb8zw65y0Sl9yJjmB2u9Q"
 headers = {"authorization": ASSEMBLYAI_API_KEY}
 
@@ -36,7 +38,7 @@ def extract_possible_company_names(text):
         "companies", "company", "shares", "indices", "index", "group", "holdings",
         "performance", "analysis", "latest", "find", "out", "about", "looking",
         "for", "which", "are", "these", "those", "any", "some", "get", "inform",
-        "us", "please","today", "tomorrow", "yesterday",
+        "us", "please", "today", "tomorrow", "yesterday",
         "can you tell me", "can you give me", "can you find",
         "what about", "how about", "what's the", "tell me about"
     }
@@ -50,7 +52,6 @@ def extract_possible_company_names(text):
 def search_stock_symbol_fmp(keyword):
     try:
         # FMP free tier has very tight limits.
-        # This endpoint specifically for search-name might also have limits.
         url = f"https://financialmodelingprep.com/api/v3/search?query={keyword}&limit=1&apikey={FMP_API_KEY}"
         res = requests.get(url)
         if res.status_code == 200:
@@ -62,7 +63,7 @@ def search_stock_symbol_fmp(keyword):
                         return r["symbol"]
                 return results[0]["symbol"] # Fallback to first if no preferred exchange
         elif res.status_code == 429:
-            st.error("❌ FMP API Rate Limit Exceeded. Please wait a moment and try again, or check your API key.")
+            st.error("❌ FMP API Rate Limit Exceeded. Please wait a moment and try again.")
             return None
         else:
             print(f"FMP search error status: {res.status_code}, response: {res.text}")
@@ -139,8 +140,7 @@ def extract_text_from_pdf(file):
         return None
     return text
 
-# NEW FUNCTION: Chunking text for RAG
-# Line 106: Start of new function `chunk_text`
+# Chunking text for RAG
 def chunk_text(text, chunk_size=300, chunk_overlap=50):
     """Splits text into chunks of a specified size with overlap."""
     tokens = text.split()  # Simple tokenization by spaces
@@ -152,28 +152,122 @@ def chunk_text(text, chunk_size=300, chunk_overlap=50):
         chunks.append(chunk)
         start += chunk_size - chunk_overlap
     return chunks
-# Line 116: End of new function `chunk_text`
 
+# --- Custom Audio Recorder Component (Input) ---
+# This JavaScript captures audio and sends it back to Streamlit via a message
+def st_audiorecorder_v2(key=None):
+    if key is None:
+        key = "default_audiorecorder_key"
 
-# --- Streamlit UI and Logic ---
+    component_html = f"""
+    <div id="audiorecorder_container_{key}">
+        <button id="startRecording_{key}">Start Recording</button>
+        <button id="stopRecording_{key}" disabled>Stop Recording</button>
+        <audio id="audioPlayback_{key}" controls></audio>
+        <div id="status_{key}">Ready to record.</div>
+    </div>
+    <script>
+        const startButton = document.getElementById('startRecording_{key}');
+        const stopButton = document.getElementById('stopRecording_{key}');
+        const audioPlayback = document.getElementById('audioPlayback_{key}');
+        const statusDiv = document.getElementById('status_{key}');
+
+        let mediaRecorder;
+        let audioChunks = [];
+        let audioBlob;
+
+        startButton.onclick = async () => {{
+            audioChunks = [];
+            statusDiv.textContent = 'Recording...';
+            startButton.disabled = true;
+            stopButton.disabled = false;
+            try {{
+                const stream = await navigator.mediaDevices.getUserMedia({{ audio: true }});
+                mediaRecorder = new MediaRecorder(stream);
+                mediaRecorder.ondataavailable = event => {{
+                    audioChunks.push(event.data);
+                }};
+                mediaRecorder.onstop = async () => {{
+                    audioBlob = new Blob(audioChunks, {{ type: 'audio/webm' }}); // Use webm for broader browser support
+                    const audioUrl = URL.createObjectURL(audioBlob);
+                    audioPlayback.src = audioUrl;
+                    audioPlayback.play(); // Play back recorded audio
+                    statusDiv.textContent = 'Processing recorded audio...';
+
+                    // Convert blob to Base64
+                    const reader = new FileReader();
+                    reader.readAsDataURL(audioBlob);
+                    reader.onloadend = () => {{
+                        const base64data = reader.result;
+                        // Send Base64 data back to Streamlit
+                        window.parent.postMessage({{
+                            type: 'streamlit:setComponentValue',
+                            key: '{key}',
+                            value: base64data
+                        }}, '*');
+                        statusDiv.textContent = 'Audio recorded and sent.';
+                    }};
+                }};
+                mediaRecorder.start();
+            }} catch (err) {{
+                statusDiv.textContent = 'Error accessing microphone: ' + err.message;
+                startButton.disabled = false;
+                stopButton.disabled = true;
+                console.error('Error accessing microphone:', err);
+            }}
+        }};
+
+        stopButton.onclick = () => {{
+            mediaRecorder.stop();
+            startButton.disabled = false;
+            stopButton.disabled = true;
+            // Stop microphone stream
+            if (mediaRecorder && mediaRecorder.stream) {{
+                mediaRecorder.stream.getTracks().forEach(track => track.stop());
+            }}
+            statusDiv.textContent = 'Recording stopped.';
+        }};
+    </script>
+    """
+    # Use st.components.v1.html to embed the component
+    returned_base64_audio = st.components.v1.html(component_html, height=150, scrolling=False, key=key)
+    return returned_base64_audio
+
+# --- Text-to-Speech Function (Output) ---
+def text_to_audio(text_input):
+    try:
+        tts = gTTS(text=text_input, lang='en', slow=False)
+        audio_bytes_io = io.BytesIO()
+        tts.write_to_fp(audio_bytes_io)
+        audio_bytes_io.seek(0) # Rewind to the beginning
+        return audio_bytes_io
+    except Exception as e:
+        st.error(f"Error converting text to speech: {e}")
+        return None
+
+# --- Main Application Logic ---
 
 # Use columns for a cleaner layout of the two main features
 col1, col2 = st.columns(2)
 
 with col1:
     st.subheader("🎤 Voice Query Analysis")
-    # Line 123: Replace file uploader with audio recorder
-    # audio_file = st.file_uploader("Upload an MP3 file for voice query", type=["mp3"])
-    wav_audio_data = st_audiorecorder() # Microphone input widget
+    # Custom microphone input widget
+    recorded_audio_base64 = st_audiorecorder_v2(key="voice_query_recorder")
 
-    if wav_audio_data is not None: # Check if audio data is available from the recorder
-        # Use a unique key for the button to avoid issues if other buttons exist
+    # Only proceed if audio data has been recorded
+    if recorded_audio_base64:
+        st.success("Audio recorded! Click 'Transcribe & Fetch Stock' to process.")
+        
+        # Decode the Base64 audio data when the button is pressed
         if st.button("Transcribe & Fetch Stock (Voice)", key="transcribe_button"):
-            # Line 129: Changed from audio_file to wav_audio_data
+            base64_data_only = recorded_audio_base64.split(",")[1]
+            audio_data_bytes = base64.b64decode(base64_data_only)
+
             with st.spinner("Uploading audio to AssemblyAI..."):
                 # AssemblyAI's upload endpoint can take raw bytes
                 # We need to provide a filename and content type
-                files = {"file": ("audio.wav", wav_audio_data, "audio/wav")}
+                files = {"file": ("audio.webm", audio_data_bytes, "audio/webm")} # Use webm as type
                 upload_res = requests.post(
                     "https://api.assemblyai.com/v2/upload",
                     headers=headers,
@@ -218,13 +312,13 @@ with col1:
                                     st.write("🔍 Extracted keywords from voice:", keywords)
 
                                     found_symbols = set() # Use a set to avoid duplicate symbols
-
+                                    
                                     # Try to find symbols using FMP (prioritized for broader search)
                                     for keyword in keywords:
                                         symbol = search_stock_symbol_fmp(keyword)
                                         if symbol:
                                             found_symbols.add(symbol)
-
+                                            
                                     # Also, try to directly validate keywords as YFinance tickers
                                     for word in keywords:
                                         cleaned_word = word.upper()
@@ -234,7 +328,7 @@ with col1:
                                                 if ticker_info and ticker_info.get("symbol") == cleaned_word and ticker_info.get("regularMarketPrice"):
                                                     found_symbols.add(cleaned_word)
                                             except:
-                                                pass
+                                                pass 
 
                                     if found_symbols:
                                         st.info(f"🔎 Found potential stock symbols: {', '.join(list(found_symbols))}")
@@ -249,6 +343,8 @@ with col1:
 
                                         if all_stock_summaries:
                                             st.subheader("📊 Stock Information from Voice Query:")
+                                            # Prepare text for TTS output
+                                            output_speech_text = "Here's a brief overview of the stocks you asked about: "
                                             for data in all_stock_summaries:
                                                 st.markdown("---") # Separator for each stock
                                                 st.write(f"**{data['name']} ({data['symbol']})**")
@@ -272,15 +368,40 @@ with col1:
 
                                                 if data['summary'] and data['summary'] != 'No business summary available.':
                                                     st.markdown(f"📝 **Business Summary:** {data['summary'][:300]}...") # Show a snippet of summary
+                                                
+                                                # Add to speech text
+                                                output_speech_text += f"{data['name']} is at ${data['price']:.2f}. Daily change {data['daily_change_pct']:.2f} percent. Weekly change {data['weekly_change_pct']:.2f} percent. "
+                                                output_speech_text += f"Insight: {insight_sentence}. "
+
+                                            # --- Text-to-Speech Output ---
+                                            st.subheader("🔊 Audio Response")
+                                            audio_output_bytes_io = text_to_audio(output_speech_text)
+                                            if audio_output_bytes_io:
+                                                st.audio(audio_output_bytes_io.read(), format='audio/mp3')
+                                            else:
+                                                st.error("❌ Could not generate audio response.")
                                         else:
                                             st.warning("⚠️ No detailed stock data could be retrieved for the identified symbols.")
+                                            st.subheader("🔊 Audio Response")
+                                            audio_output_bytes_io = text_to_audio("Could not retrieve detailed stock data for the identified symbols.")
+                                            if audio_output_bytes_io:
+                                                st.audio(audio_output_bytes_io.read(), format='audio/mp3')
+
                                     else:
                                         st.warning("⚠️ No valid stock symbols or company names found in your voice input.")
+                                        st.subheader("🔊 Audio Response")
+                                        audio_output_bytes_io = text_to_audio("No valid stock symbols or company names found in your voice input.")
+                                        if audio_output_bytes_io:
+                                            st.audio(audio_output_bytes_io.read(), format='audio/mp3')
                                 else:
                                     st.error("❌ Voice Transcription failed.")
                                     st.write(polling_res.json())
-    elif wav_audio_data is None:
-        st.info("Please click the microphone and record your query.")
+                                    st.subheader("🔊 Audio Response")
+                                    audio_output_bytes_io = text_to_audio("Voice transcription failed.")
+                                    if audio_output_bytes_io:
+                                        st.audio(audio_output_bytes_io.read(), format='audio/mp3')
+    elif recorded_audio_base64 is None: # This condition ensures the message is shown when no audio is recorded yet
+        st.info("Please click 'Start Recording' to record your query.")
 
 
 with col2:
@@ -296,7 +417,6 @@ with col2:
             # Show a longer preview but with ellipsis if truncated
             st.write(extracted_text[:4000] + "..." if len(extracted_text) > 4000 else extracted_text)
 
-            # Line 323: Start of Chunking Implementation
             st.subheader("✂️ PDF Text Chunks:")
             chunks = chunk_text(extracted_text)
             if chunks:
@@ -309,14 +429,13 @@ with col2:
                     st.warning("Displaying only the first 5 chunks for preview.")
             else:
                 st.warning("No chunks were generated from the PDF text.")
-            # Line 337: End of Chunking Implementation
 
             st.subheader("💡 Further Analysis of PDF Content:")
             st.write("You can implement more advanced analysis of the extracted text here. For example:")
             st.markdown("- **Identify key entities (companies, dates, financial figures)**")
             st.markdown("- **Summarize sections**")
             st.markdown("- **Answer questions based on PDF content (RAG)**")
-
+            
             # Example: Simple keyword search in PDF
             st.markdown("**Simple Keyword Search:**")
             pdf_keywords_to_find = ["earnings", "revenue", "profit", "loss", "outlook", "guidance", "dividend", "acquisition", "merger"]
@@ -330,16 +449,16 @@ with col2:
             # Example: Try to find stock symbols in the PDF content itself
             st.markdown("**Attempting to find stock symbols in PDF:**")
             pdf_found_symbols = set()
-
+            
             # Extract possible company names from the PDF text using the same logic
             pdf_possible_names = extract_possible_company_names(extracted_text)
-
+            
             # Try to find symbols using FMP for keywords from PDF
             for keyword in pdf_possible_names:
                 symbol = search_stock_symbol_fmp(keyword)
                 if symbol:
                     pdf_found_symbols.add(symbol)
-
+            
             # Also, try to directly validate keywords from PDF as YFinance tickers
             for word in pdf_possible_names: # Re-use cleaned words
                 cleaned_word = word.upper()
@@ -361,7 +480,7 @@ with col2:
                         pdf_stock_data_results[symbol] = data
                     else:
                         st.warning(f"⚠️ {data['error']} for symbol from PDF: {symbol}")
-
+                
                 if pdf_stock_data_results:
                     for symbol, data in pdf_stock_data_results.items():
                         st.markdown("---") # Separator for each stock
@@ -389,10 +508,14 @@ st.sidebar.markdown("- **Daily/Weekly Change**: Calculates and displays percenta
 st.sidebar.markdown("- **PDF Text Extraction**: Extracts and previews text from finance PDFs.")
 st.sidebar.markdown("- **PDF Stock Identification**: Attempts to find stock symbols within PDF content.")
 st.sidebar.markdown("- **PDF Text Chunking**: Breaks down PDF text into manageable chunks for RAG.")
+st.sidebar.markdown("- **Audio Input/Output**: Live microphone recording and synthesized audio responses.")
 st.sidebar.markdown("---")
 st.sidebar.markdown("### Dependencies:")
 st.sidebar.markdown("- `streamlit`")
 st.sidebar.markdown("- `requests`")
 st.sidebar.markdown("- `yfinance`")
 st.sidebar.markdown("- `PyMuPDF` (installed as `fitz`)")
-st.sidebar.markdown("- `streamlit_audiorecorder` (for microphone input)")
+st.sidebar.markdown("- `gTTS` (for Text-to-Speech)")
+st.sidebar.markdown("---")
+st.sidebar.markdown("**Note:** For live audio recording to work, your browser will ask for microphone permission. Please grant it.")
+st.sidebar.markdown("**API Keys:** API keys are currently embedded in the code. For production use, consider using Streamlit Secrets for better security.")
