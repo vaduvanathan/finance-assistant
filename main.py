@@ -265,9 +265,18 @@ with col1:
     recorded_audio_base64 = st.session_state.get(AUDIO_RECORDER_KEY, None)
     st.write("Session State:", st.session_state) # Debugging line: Check session state
 
-    # Only proceed if audio data has been recorded AND the transcribe button is pressed
+    # A flag to control the visibility of the "Transcribe & Fetch Stock" button
+    show_transcribe_button = False
+
     if recorded_audio_base64 and isinstance(recorded_audio_base64, str) and "data:audio/webm;base64," in recorded_audio_base64:
         st.success("Audio recorded! Click 'Transcribe & Fetch Stock' to process.")
+        show_transcribe_button = True
+    elif recorded_audio_base64 is None or (isinstance(recorded_audio_base64, str) and not recorded_audio_base64.strip()):
+        st.info("Ready to record your voice query. Click 'Start Recording' and then 'Stop Recording'.")
+    else: # This handles the state where some data might be present but not the full base64 audio (e.g., initial click)
+        st.info("Recording initiated. Please click 'Stop Recording' then 'Transcribe & Fetch Stock'.")
+
+    if show_transcribe_button:
         if st.button("Transcribe & Fetch Stock (Voice)", key="transcribe_button"):
             base64_data_only = recorded_audio_base64.split(",")[1]
             try:
@@ -410,14 +419,6 @@ with col1:
                 st.warning("Please ensure audio is recorded before clicking 'Transcribe & Fetch Stock'.")
             except Exception as e:
                 st.error(f"An unexpected error occurred during audio processing: {e}")
-
-    # This condition is for when the component has initialized but no audio has been recorded yet.
-    # `recorded_audio_base64` will be `None` initially, or an empty string from JS if no recording happened.
-    elif recorded_audio_base64 is None or (isinstance(recorded_audio_base64, str) and not recorded_audio_base64.strip()):
-        st.info("Ready to record your voice query. Click 'Start Recording' and then 'Stop Recording'.")
-    else: # This handles the state where some data might be present but not the full base64 audio (e.g., initial click)
-        st.info("Recording initiated. Please click 'Stop Recording' then 'Transcribe & Fetch Stock'.")
-
 
 with col2:
     st.subheader("📄 PDF Document Analysis")
