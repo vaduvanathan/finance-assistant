@@ -2,8 +2,11 @@ import streamlit as st
 import requests
 import time
 import yfinance as yf
-import string  # Import the string module for punctuation
-import fitz   # PyMuPDF for PDF processing
+import string
+import fitz
+import io # Required for handling audio bytes in memory
+import base64 # Required by streamlit_audiorecorder
+from streamlit_audiorecorder import st_audiorecorder # Import the audio recorder
 
 st.set_page_config(page_title="Finance Voice & Document Assistant", layout="wide")
 st.title("🎙️ Multi-Source Finance Assistant")
@@ -136,6 +139,22 @@ def extract_text_from_pdf(file):
         return None
     return text
 
+# NEW FUNCTION: Chunking text for RAG
+# Line 106: Start of new function `chunk_text`
+def chunk_text(text, chunk_size=300, chunk_overlap=50):
+    """Splits text into chunks of a specified size with overlap."""
+    tokens = text.split()  # Simple tokenization by spaces
+    chunks = []
+    start = 0
+    while start < len(tokens):
+        end = min(start + chunk_size, len(tokens))
+        chunk = " ".join(tokens[start:end])
+        chunks.append(chunk)
+        start += chunk_size - chunk_overlap
+    return chunks
+# Line 116: End of new function `chunk_text`
+
+
 # --- Streamlit UI and Logic ---
 
 # Use columns for a cleaner layout of the two main features
@@ -143,16 +162,22 @@ col1, col2 = st.columns(2)
 
 with col1:
     st.subheader("🎤 Voice Query Analysis")
-    audio_file = st.file_uploader("Upload an MP3 file for voice query", type=["mp3"])
+    # Line 123: Replace file uploader with audio recorder
+    # audio_file = st.file_uploader("Upload an MP3 file for voice query", type=["mp3"])
+    wav_audio_data = st_audiorecorder() # Microphone input widget
 
-    if audio_file:
+    if wav_audio_data is not None: # Check if audio data is available from the recorder
         # Use a unique key for the button to avoid issues if other buttons exist
         if st.button("Transcribe & Fetch Stock (Voice)", key="transcribe_button"):
+            # Line 129: Changed from audio_file to wav_audio_data
             with st.spinner("Uploading audio to AssemblyAI..."):
+                # AssemblyAI's upload endpoint can take raw bytes
+                # We need to provide a filename and content type
+                files = {"file": ("audio.wav", wav_audio_data, "audio/wav")}
                 upload_res = requests.post(
                     "https://api.assemblyai.com/v2/upload",
                     headers=headers,
-                    files={"file": audio_file}
+                    files=files # Use the files dictionary with bytes
                 )
                 if upload_res.status_code != 200:
                     st.error("❌ Audio upload failed to AssemblyAI.")
@@ -193,13 +218,13 @@ with col1:
                                     st.write("🔍 Extracted keywords from voice:", keywords)
 
                                     found_symbols = set() # Use a set to avoid duplicate symbols
-                                    
+
                                     # Try to find symbols using FMP (prioritized for broader search)
                                     for keyword in keywords:
                                         symbol = search_stock_symbol_fmp(keyword)
                                         if symbol:
                                             found_symbols.add(symbol)
-                                            
+
                                     # Also, try to directly validate keywords as YFinance tickers
                                     for word in keywords:
                                         cleaned_word = word.upper()
@@ -209,7 +234,7 @@ with col1:
                                                 if ticker_info and ticker_info.get("symbol") == cleaned_word and ticker_info.get("regularMarketPrice"):
                                                     found_symbols.add(cleaned_word)
                                             except:
-                                                pass 
+                                                pass
 
                                     if found_symbols:
                                         st.info(f"🔎 Found potential stock symbols: {', '.join(list(found_symbols))}")
@@ -254,6 +279,8 @@ with col1:
                                 else:
                                     st.error("❌ Voice Transcription failed.")
                                     st.write(polling_res.json())
+    elif wav_audio_data is None:
+        st.info("Please click the microphone and record your query.")
 
 
 with col2:
@@ -269,12 +296,27 @@ with col2:
             # Show a longer preview but with ellipsis if truncated
             st.write(extracted_text[:4000] + "..." if len(extracted_text) > 4000 else extracted_text)
 
+            # Line 323: Start of Chunking Implementation
+            st.subheader("✂️ PDF Text Chunks:")
+            chunks = chunk_text(extracted_text)
+            if chunks:
+                st.info(f"Generated {len(chunks)} chunks from the PDF text.")
+                for i, chunk in enumerate(chunks[:5]):  # Display the first 5 chunks
+                    st.markdown(f"**Chunk {i+1}:**")
+                    st.write(chunk[:500] + "..." if len(chunk) > 500 else chunk)
+                    st.markdown("---")
+                if len(chunks) > 5:
+                    st.warning("Displaying only the first 5 chunks for preview.")
+            else:
+                st.warning("No chunks were generated from the PDF text.")
+            # Line 337: End of Chunking Implementation
+
             st.subheader("💡 Further Analysis of PDF Content:")
             st.write("You can implement more advanced analysis of the extracted text here. For example:")
             st.markdown("- **Identify key entities (companies, dates, financial figures)**")
             st.markdown("- **Summarize sections**")
             st.markdown("- **Answer questions based on PDF content (RAG)**")
-            
+
             # Example: Simple keyword search in PDF
             st.markdown("**Simple Keyword Search:**")
             pdf_keywords_to_find = ["earnings", "revenue", "profit", "loss", "outlook", "guidance", "dividend", "acquisition", "merger"]
@@ -288,16 +330,16 @@ with col2:
             # Example: Try to find stock symbols in the PDF content itself
             st.markdown("**Attempting to find stock symbols in PDF:**")
             pdf_found_symbols = set()
-            
+
             # Extract possible company names from the PDF text using the same logic
             pdf_possible_names = extract_possible_company_names(extracted_text)
-            
+
             # Try to find symbols using FMP for keywords from PDF
             for keyword in pdf_possible_names:
                 symbol = search_stock_symbol_fmp(keyword)
                 if symbol:
                     pdf_found_symbols.add(symbol)
-            
+
             # Also, try to directly validate keywords from PDF as YFinance tickers
             for word in pdf_possible_names: # Re-use cleaned words
                 cleaned_word = word.upper()
@@ -319,7 +361,7 @@ with col2:
                         pdf_stock_data_results[symbol] = data
                     else:
                         st.warning(f"⚠️ {data['error']} for symbol from PDF: {symbol}")
-                
+
                 if pdf_stock_data_results:
                     for symbol, data in pdf_stock_data_results.items():
                         st.markdown("---") # Separator for each stock
@@ -346,9 +388,11 @@ st.sidebar.markdown("- **Multi-Stock Info**: Fetches and displays data for multi
 st.sidebar.markdown("- **Daily/Weekly Change**: Calculates and displays percentage changes.")
 st.sidebar.markdown("- **PDF Text Extraction**: Extracts and previews text from finance PDFs.")
 st.sidebar.markdown("- **PDF Stock Identification**: Attempts to find stock symbols within PDF content.")
+st.sidebar.markdown("- **PDF Text Chunking**: Breaks down PDF text into manageable chunks for RAG.")
 st.sidebar.markdown("---")
 st.sidebar.markdown("### Dependencies:")
 st.sidebar.markdown("- `streamlit`")
 st.sidebar.markdown("- `requests`")
 st.sidebar.markdown("- `yfinance`")
 st.sidebar.markdown("- `PyMuPDF` (installed as `fitz`)")
+st.sidebar.markdown("- `streamlit_audiorecorder` (for microphone input)")
