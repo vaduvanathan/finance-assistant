@@ -202,7 +202,7 @@ def st_audiorecorder_v2(key=None):
                         // Send Base64 data back to Streamlit
                         window.parent.postMessage({{
                             type: 'streamlit:setComponentValue',
-                            key: '{key}', # This 'key' is crucial for JavaScript communication
+                            key: '{key}',
                             value: base64data
                         }}, '*');
                         statusDiv.textContent = 'Audio recorded and sent.';
@@ -230,8 +230,7 @@ def st_audiorecorder_v2(key=None):
     </script>
     """
     # Use st.components.v1.html to embed the component
-    # REMOVE 'key=key' from here! This was the cause of the TypeError.
-    returned_base64_audio = st.components.v1.html(component_html, height=150, scrolling=False)
+    returned_base64_audio = st.components.v1.html(component_html, height=150, scrolling=False, key=key)
     return returned_base64_audio
 
 # --- Text-to-Speech Function (Output) ---
@@ -256,153 +255,158 @@ with col1:
     # Custom microphone input widget
     recorded_audio_base64 = st_audiorecorder_v2(key="voice_query_recorder")
 
-    # Only proceed if audio data has been recorded
-    if recorded_audio_base64:
+    # Only proceed if audio data has been recorded AND the transcribe button is pressed
+    if recorded_audio_base64 and "data:audio/webm;base64," in recorded_audio_base64:
         st.success("Audio recorded! Click 'Transcribe & Fetch Stock' to process.")
-        
+
         # Decode the Base64 audio data when the button is pressed
         if st.button("Transcribe & Fetch Stock (Voice)", key="transcribe_button"):
             base64_data_only = recorded_audio_base64.split(",")[1]
-            audio_data_bytes = base64.b64decode(base64_data_only)
+            try:
+                audio_data_bytes = base64.b64decode(base64_data_only)
+                with st.spinner("Uploading audio to AssemblyAI..."):
+                    # AssemblyAI's upload endpoint can take raw bytes
+                    # We need to provide a filename and content type
+                    files = {"file": ("audio.webm", audio_data_bytes, "audio/webm")} # Use webm as type
+                    upload_res = requests.post(
+                        "https://api.assemblyai.com/v2/upload",
+                        headers=headers,
+                        files=files # Use the files dictionary with bytes
+                    )
+                    if upload_res.status_code != 200:
+                        st.error("❌ Audio upload failed to AssemblyAI.")
+                        st.write(upload_res.text)
+                    else:
+                        audio_url = upload_res.json()["upload_url"]
 
-            with st.spinner("Uploading audio to AssemblyAI..."):
-                # AssemblyAI's upload endpoint can take raw bytes
-                # We need to provide a filename and content type
-                files = {"file": ("audio.webm", audio_data_bytes, "audio/webm")} # Use webm as type
-                upload_res = requests.post(
-                    "https://api.assemblyai.com/v2/upload",
-                    headers=headers,
-                    files=files # Use the files dictionary with bytes
-                )
-                if upload_res.status_code != 200:
-                    st.error("❌ Audio upload failed to AssemblyAI.")
-                    st.write(upload_res.text)
-                else:
-                    audio_url = upload_res.json()["upload_url"]
+                        with st.spinner("Sending for transcription..."):
+                            json_data = {"audio_url": audio_url}
+                            transcript_res = requests.post(
+                                "https://api.assemblyai.com/v2/transcript",
+                                json=json_data,
+                                headers=headers
+                            )
 
-                    with st.spinner("Sending for transcription..."):
-                        json_data = {"audio_url": audio_url}
-                        transcript_res = requests.post(
-                            "https://api.assemblyai.com/v2/transcript",
-                            json=json_data,
-                            headers=headers
-                        )
+                            if transcript_res.status_code != 200:
+                                st.error("❌ Transcription request failed.")
+                                st.write(transcript_res.text)
+                            else:
+                                transcript_id = transcript_res.json()["id"]
 
-                        if transcript_res.status_code != 200:
-                            st.error("❌ Transcription request failed.")
-                            st.write(transcript_res.text)
-                        else:
-                            transcript_id = transcript_res.json()["id"]
+                                with st.spinner("Transcribing audio (this may take a moment)..."):
+                                    status = "queued"
+                                    while status not in ["completed", "error"]:
+                                        polling_res = requests.get(
+                                            f"https://api.assemblyai.com/v2/transcript/{transcript_id}",
+                                            headers=headers
+                                        )
+                                        status = polling_res.json()["status"]
+                                        time.sleep(3) # Wait before polling again
 
-                            with st.spinner("Transcribing audio (this may take a moment)..."):
-                                status = "queued"
-                                while status not in ["completed", "error"]:
-                                    polling_res = requests.get(
-                                        f"https://api.assemblyai.com/v2/transcript/{transcript_id}",
-                                        headers=headers
-                                    )
-                                    status = polling_res.json()["status"]
-                                    time.sleep(3) # Wait before polling again
+                                    if status == "completed":
+                                        transcribed_text = polling_res.json()["text"]
+                                        st.success("✅ Voice Transcription Complete:")
+                                        st.write(transcribed_text)
 
-                                if status == "completed":
-                                    transcribed_text = polling_res.json()["text"]
-                                    st.success("✅ Voice Transcription Complete:")
-                                    st.write(transcribed_text)
+                                        keywords = extract_possible_company_names(transcribed_text)
+                                        st.write("🔍 Extracted keywords from voice:", keywords)
 
-                                    keywords = extract_possible_company_names(transcribed_text)
-                                    st.write("🔍 Extracted keywords from voice:", keywords)
-
-                                    found_symbols = set() # Use a set to avoid duplicate symbols
-                                    
-                                    # Try to find symbols using FMP (prioritized for broader search)
-                                    for keyword in keywords:
-                                        symbol = search_stock_symbol_fmp(keyword)
-                                        if symbol:
-                                            found_symbols.add(symbol)
-                                            
-                                    # Also, try to directly validate keywords as YFinance tickers
-                                    for word in keywords:
-                                        cleaned_word = word.upper()
-                                        if cleaned_word not in found_symbols and (len(cleaned_word) <= 5 and cleaned_word.isalpha() or '.' in cleaned_word):
-                                            try:
-                                                ticker_info = yf.Ticker(cleaned_word).info
-                                                if ticker_info and ticker_info.get("symbol") == cleaned_word and ticker_info.get("regularMarketPrice"):
-                                                    found_symbols.add(cleaned_word)
-                                            except:
-                                                pass 
-
-                                    if found_symbols:
-                                        st.info(f"🔎 Found potential stock symbols: {', '.join(list(found_symbols))}")
-
-                                        all_stock_summaries = [] # To store summaries of all found stocks
-                                        for symbol in list(found_symbols): # Convert set to list to iterate
-                                            data = get_stock_summary(symbol)
-                                            if "error" not in data:
-                                                all_stock_summaries.append(data)
-                                            else:
-                                                st.warning(f"⚠️ {data['error']}")
-
-                                        if all_stock_summaries:
-                                            st.subheader("📊 Stock Information from Voice Query:")
-                                            # Prepare text for TTS output
-                                            output_speech_text = "Here's a brief overview of the stocks you asked about: "
-                                            for data in all_stock_summaries:
-                                                st.markdown("---") # Separator for each stock
-                                                st.write(f"**{data['name']} ({data['symbol']})**")
-                                                st.write(f"💰 Current Price: ${data['price']:.2f}")
-                                                if data['open'] != 'N/A': # Check if data is available
-                                                    st.write(f"📈 Open: ${data['open']:.2f}, High: ${data['high']:.2f}, Low: ${data['low']:.2f}")
-                                                if data['marketCap'] != 'N/A':
-                                                    st.write(f"🏢 Market Cap: {data['marketCap']}")
-                                                st.write(f"📊 Daily Change: **{data['daily_change_pct']:.2f}%**")
-                                                st.write(f"📅 Weekly Change: **{data['weekly_change_pct']:.2f}%**")
-                                                st.write(f"📈 Weekly Trend: {data['trend']}")
-
-                                                # Insight sentence for weekly change
-                                                if data['weekly_change_pct'] > 0:
-                                                    insight_sentence = f"{data['name']} stocks are up by {data['weekly_change_pct']:.2f}% this week."
-                                                elif data['weekly_change_pct'] < 0:
-                                                    insight_sentence = f"{data['name']} stocks are down by {abs(data['weekly_change_pct']):.2f}% this week."
-                                                else:
-                                                    insight_sentence = f"{data['name']} stocks are unchanged this week."
-                                                st.info(f"💡 Insight: {insight_sentence}") # Display the insight sentence
-
-                                                if data['summary'] and data['summary'] != 'No business summary available.':
-                                                    st.markdown(f"📝 **Business Summary:** {data['summary'][:300]}...") # Show a snippet of summary
+                                        found_symbols = set() # Use a set to avoid duplicate symbols
+                                        
+                                        # Try to find symbols using FMP (prioritized for broader search)
+                                        for keyword in keywords:
+                                            symbol = search_stock_symbol_fmp(keyword)
+                                            if symbol:
+                                                found_symbols.add(symbol)
                                                 
-                                                # Add to speech text
-                                                output_speech_text += f"{data['name']} is at ${data['price']:.2f}. Daily change {data['daily_change_pct']:.2f} percent. Weekly change {data['weekly_change_pct']:.2f} percent. "
-                                                output_speech_text += f"Insight: {insight_sentence}. "
+                                        # Also, try to directly validate keywords as YFinance tickers
+                                        for word in keywords:
+                                            cleaned_word = word.upper()
+                                            if cleaned_word not in found_symbols and (len(cleaned_word) <= 5 and cleaned_word.isalpha() or '.' in cleaned_word):
+                                                try:
+                                                    ticker_info = yf.Ticker(cleaned_word).info
+                                                    if ticker_info and ticker_info.get("symbol") == cleaned_word and ticker_info.get("regularMarketPrice"):
+                                                        found_symbols.add(cleaned_word)
+                                                except:
+                                                    pass 
 
-                                            # --- Text-to-Speech Output ---
-                                            st.subheader("🔊 Audio Response")
-                                            audio_output_bytes_io = text_to_audio(output_speech_text)
-                                            if audio_output_bytes_io:
-                                                st.audio(audio_output_bytes_io.read(), format='audio/mp3')
+                                        if found_symbols:
+                                            st.info(f"🔎 Found potential stock symbols: {', '.join(list(found_symbols))}")
+
+                                            all_stock_summaries = [] # To store summaries of all found stocks
+                                            for symbol in list(found_symbols): # Convert set to list to iterate
+                                                data = get_stock_summary(symbol)
+                                                if "error" not in data:
+                                                    all_stock_summaries.append(data)
+                                                else:
+                                                    st.warning(f"⚠️ {data['error']}")
+
+                                            if all_stock_summaries:
+                                                st.subheader("📊 Stock Information from Voice Query:")
+                                                # Prepare text for TTS output
+                                                output_speech_text = "Here's a brief overview of the stocks you asked about: "
+                                                for data in all_stock_summaries:
+                                                    st.markdown("---") # Separator for each stock
+                                                    st.write(f"**{data['name']} ({data['symbol']})**")
+                                                    st.write(f"💰 Current Price: ${data['price']:.2f}")
+                                                    if data['open'] != 'N/A': # Check if data is available
+                                                        st.write(f"📈 Open: ${data['open']:.2f}, High: ${data['high']:.2f}, Low: ${data['low']:.2f}")
+                                                    if data['marketCap'] != 'N/A':
+                                                        st.write(f"🏢 Market Cap: {data['marketCap']}")
+                                                    st.write(f"📊 Daily Change: **{data['daily_change_pct']:.2f}%**")
+                                                    st.write(f"📅 Weekly Change: **{data['weekly_change_pct']:.2f}%**")
+                                                    st.write(f"📈 Weekly Trend: {data['trend']}")
+
+                                                    # Insight sentence for weekly change
+                                                    if data['weekly_change_pct'] > 0:
+                                                        insight_sentence = f"{data['name']} stocks are up by {data['weekly_change_pct']:.2f}% this week."
+                                                    elif data['weekly_change_pct'] < 0:
+                                                        insight_sentence = f"{data['name']} stocks are down by {abs(data['weekly_change_pct']):.2f}% this week."
+                                                    else:
+                                                        insight_sentence = f"{data['name']} stocks are unchanged this week."
+                                                    st.info(f"💡 Insight: {insight_sentence}") # Display the insight sentence
+
+                                                    if data['summary'] and data['summary'] != 'No business summary available.':
+                                                        st.markdown(f"📝 **Business Summary:** {data['summary'][:300]}...") # Show a snippet of summary
+                                                    
+                                                    # Add to speech text
+                                                    output_speech_text += f"{data['name']} is at ${data['price']:.2f}. Daily change {data['daily_change_pct']:.2f} percent. Weekly change {data['weekly_change_pct']:.2f} percent. "
+                                                    output_speech_text += f"Insight: {insight_sentence}. "
+
+                                                # --- Text-to-Speech Output ---
+                                                st.subheader("🔊 Audio Response")
+                                                audio_output_bytes_io = text_to_audio(output_speech_text)
+                                                if audio_output_bytes_io:
+                                                    st.audio(audio_output_bytes_io.read(), format='audio/mp3')
+                                                else:
+                                                    st.error("❌ Could not generate audio response.")
                                             else:
-                                                st.error("❌ Could not generate audio response.")
+                                                st.warning("⚠️ No detailed stock data could be retrieved for the identified symbols.")
+                                                st.subheader("🔊 Audio Response")
+                                                audio_output_bytes_io = text_to_audio("Could not retrieve detailed stock data for the identified symbols.")
+                                                if audio_output_bytes_io:
+                                                    st.audio(audio_output_bytes_io.read(), format='audio/mp3')
+
                                         else:
-                                            st.warning("⚠️ No detailed stock data could be retrieved for the identified symbols.")
+                                            st.warning("⚠️ No valid stock symbols or company names found in your voice input.")
                                             st.subheader("🔊 Audio Response")
-                                            audio_output_bytes_io = text_to_audio("Could not retrieve detailed stock data for the identified symbols.")
+                                            audio_output_bytes_io = text_to_audio("No valid stock symbols or company names found in your voice input.")
                                             if audio_output_bytes_io:
                                                 st.audio(audio_output_bytes_io.read(), format='audio/mp3')
-
                                     else:
-                                        st.warning("⚠️ No valid stock symbols or company names found in your voice input.")
+                                        st.error("❌ Voice Transcription failed.")
+                                        st.write(polling_res.json())
                                         st.subheader("🔊 Audio Response")
-                                        audio_output_bytes_io = text_to_audio("No valid stock symbols or company names found in your voice input.")
+                                        audio_output_bytes_io = text_to_audio("Voice transcription failed.")
                                         if audio_output_bytes_io:
                                             st.audio(audio_output_bytes_io.read(), format='audio/mp3')
-                                else:
-                                    st.error("❌ Voice Transcription failed.")
-                                    st.write(polling_res.json())
-                                    st.subheader("🔊 Audio Response")
-                                    audio_output_bytes_io = text_to_audio("Voice transcription failed.")
-                                    if audio_output_bytes_io:
-                                        st.audio(audio_output_bytes_io.read(), format='audio/mp3')
-    elif recorded_audio_base64 is None: # This condition ensures the message is shown when no audio is recorded yet
-        st.info("Please click 'Start Recording' to record your query.")
+            except base64.binascii.Error as e:
+                st.error(f"❌ Error decoding Base64 audio data: {e}")
+                st.warning("Please record audio before clicking 'Transcribe & Fetch Stock'.")
+    elif recorded_audio_base64: # This condition catches if recorded_audio_base64 is a non-empty string but NOT valid audio data
+        st.info("Please record audio before clicking 'Transcribe & Fetch Stock'.")
+    else: # This condition is for the initial state before any interaction
+        st.info("Ready to record your voice query.")
 
 
 with col2:
