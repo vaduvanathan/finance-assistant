@@ -202,7 +202,7 @@ def st_audiorecorder_v2(key=None):
                         // Send Base64 data back to Streamlit
                         window.parent.postMessage({{
                             type: 'streamlit:setComponentValue',
-                            key: '{key}',
+                            key: '{key}', # This 'key' is crucial for JavaScript communication
                             value: base64data
                         }}, '*');
                         statusDiv.textContent = 'Audio recorded and sent.';
@@ -230,7 +230,8 @@ def st_audiorecorder_v2(key=None):
     </script>
     """
     # Use st.components.v1.html to embed the component
-    returned_base64_audio = st.components.v1.html(component_html, height=150, scrolling=False, key=key)
+    # REMOVE 'key=key' from here! This was the cause of the TypeError.
+    returned_base64_audio = st.components.v1.html(component_html, height=150, scrolling=False)
     return returned_base64_audio
 
 # --- Text-to-Speech Function (Output) ---
