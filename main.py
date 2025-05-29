@@ -135,10 +135,10 @@ def extract_text_from_pdf(file):
         with fitz.open(stream=file.read(), filetype="pdf") as doc:
             for page in doc:
                 text += page.get_text()
+            return text
     except Exception as e:
         st.error(f"❌ Error reading PDF: {e}")
         return None
-    return text
 
 # Chunking text for RAG
 def chunk_text(text, chunk_size=300, chunk_overlap=50):
@@ -243,7 +243,7 @@ def text_to_audio(text_input):
         audio_bytes_io = io.BytesIO()
         tts.write_to_fp(audio_bytes_io)
         audio_bytes_io.seek(0) # Rewind to the beginning
-        return audio_bytes_io
+        return audio_bytes_io.read() # Return bytes directly for st.audio
     except Exception as e:
         st.error(f"Error converting text to speech: {e}")
         return None
@@ -263,12 +263,11 @@ with col1:
 
     # Check st.session_state for the recorded audio data
     recorded_audio_base64 = st.session_state.get(AUDIO_RECORDER_KEY, None)
+    st.write("Session State:", st.session_state) # Debugging line: Check session state
 
     # Only proceed if audio data has been recorded AND the transcribe button is pressed
     if recorded_audio_base64 and isinstance(recorded_audio_base64, str) and "data:audio/webm;base64," in recorded_audio_base64:
         st.success("Audio recorded! Click 'Transcribe & Fetch Stock' to process.")
-
-        # Decode the Base64 audio data when the button is pressed
         if st.button("Transcribe & Fetch Stock (Voice)", key="transcribe_button"):
             base64_data_only = recorded_audio_base64.split(",")[1]
             try:
@@ -327,13 +326,18 @@ with col1:
 
                                         for word in keywords:
                                             cleaned_word = word.upper()
+                                            # Validate if it could be a ticker (alphabetic, short, or contains a dot like BRK.B)
                                             if cleaned_word not in found_symbols and (len(cleaned_word) <= 5 and cleaned_word.isalpha() or '.' in cleaned_word):
                                                 try:
+                                                    # Attempt to get yfinance info directly
                                                     ticker_info = yf.Ticker(cleaned_word).info
+                                                    # Check for valid info and confirm symbol match
                                                     if ticker_info and ticker_info.get("symbol") == cleaned_word and ticker_info.get("regularMarketPrice"):
                                                         found_symbols.add(cleaned_word)
                                                 except:
+                                                    # Silently catch errors for non-existent tickers
                                                     pass
+
 
                                         if found_symbols:
                                             st.info(f"🔎 Found potential stock symbols: {', '.join(list(found_symbols))}")
@@ -376,34 +380,36 @@ with col1:
                                                     output_speech_text += f"Insight: {insight_sentence}. "
 
                                                 st.subheader("🔊 Audio Response")
-                                                audio_output_bytes_io = text_to_audio(output_speech_text)
-                                                if audio_output_bytes_io:
-                                                    st.audio(audio_output_bytes_io.read(), format='audio/mp3')
+                                                audio_output_bytes = text_to_audio(output_speech_text)
+                                                if audio_output_bytes:
+                                                    st.audio(audio_output_bytes, format='audio/mp3')
                                                 else:
                                                     st.error("❌ Could not generate audio response.")
                                             else:
                                                 st.warning("⚠️ No detailed stock data could be retrieved for the identified symbols.")
                                                 st.subheader("🔊 Audio Response")
-                                                audio_output_bytes_io = text_to_audio("Could not retrieve detailed stock data for the identified symbols.")
-                                                if audio_output_bytes_io:
-                                                    st.audio(audio_output_bytes_io.read(), format='audio/mp3')
+                                                audio_output_bytes = text_to_audio("Could not retrieve detailed stock data for the identified symbols.")
+                                                if audio_output_bytes:
+                                                    st.audio(audio_output_bytes, format='audio/mp3')
 
                                         else:
                                             st.warning("⚠️ No valid stock symbols or company names found in your voice input.")
                                             st.subheader("🔊 Audio Response")
-                                            audio_output_bytes_io = text_to_audio("No valid stock symbols or company names found in your voice input.")
-                                            if audio_output_bytes_io:
-                                                st.audio(audio_output_bytes_io.read(), format='audio/mp3')
+                                            audio_output_bytes = text_to_audio("No valid stock symbols or company names found in your voice input.")
+                                            if audio_output_bytes:
+                                                st.audio(audio_output_bytes, format='audio/mp3')
                                     else:
                                         st.error("❌ Voice Transcription failed.")
                                         st.write(polling_res.json())
                                         st.subheader("🔊 Audio Response")
-                                        audio_output_bytes_io = text_to_audio("Voice transcription failed.")
-                                        if audio_output_bytes_io:
-                                            st.audio(audio_output_bytes_io.read(), format='audio/mp3')
+                                        audio_output_bytes = text_to_audio("Voice transcription failed.")
+                                        if audio_output_bytes:
+                                            st.audio(audio_output_bytes, format='audio/mp3')
             except base64.binascii.Error as e:
                 st.error(f"❌ Error decoding Base64 audio data: {e}")
                 st.warning("Please ensure audio is recorded before clicking 'Transcribe & Fetch Stock'.")
+            except Exception as e:
+                st.error(f"An unexpected error occurred during audio processing: {e}")
 
     # This condition is for when the component has initialized but no audio has been recorded yet.
     # `recorded_audio_base64` will be `None` initially, or an empty string from JS if no recording happened.
